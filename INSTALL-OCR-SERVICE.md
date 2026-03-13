@@ -6,9 +6,14 @@ Standalone guide. No prior context needed. Tested on Ubuntu 24.04, RTX 2080 Ti 1
 
 ## What This Is
 
-A single Gradio web app (port 7860) that exposes six open-source OCR/LaTeX
-recognition models behind a unified upload-and-click UI. Designed for
-digitizing chemistry equations, math formulas, and handwritten notes.
+A Gradio web app + REST API (port 7860) that exposes six open-source OCR/LaTeX
+recognition models behind a unified upload-and-click UI and a JSON HTTP API.
+Designed for digitizing chemistry equations, math formulas, and handwritten notes.
+
+REST endpoints:
+- `POST /api/ocr` — `multipart/form-data` with `model=<key>` and `image=<file>`; returns `{"latex": "...","model": "..."}`
+- `GET /api/models` — list available model keys and VRAM budgets
+- `GET /api/status` — current load/eviction state from ModelManager
 
 | Model | VRAM | Notes |
 |---|---|---|
@@ -38,7 +43,7 @@ models. OlmOCR-2 triggers full GPU eviction before loading.
 
 ```
 ~/ocr-service/
-├── app.py                    # Gradio UI + dispatch
+├── app.py                    # Gradio UI + FastAPI REST API
 ├── model_manager.py          # lazy loader + LRU eviction
 ├── models/
 │   ├── __init__.py
@@ -46,8 +51,11 @@ models. OlmOCR-2 triggers full GPU eviction before loading.
 │   ├── pix2tex_model.py
 │   ├── surya_model.py
 │   ├── got_ocr2_model.py
-│   ├── texteller_model.py    # subprocess → venv-texteller
+│   ├── texteller_model.py    # spawns texteller_worker.py in venv-texteller
+│   ├── texteller_worker.py   # standalone worker: reads image, prints JSON
 │   └── olmocr_model.py       # subprocess → vLLM on :8765
+├── test_local.py             # direct model_manager smoke test (no HTTP)
+├── test_api.py               # HTTP smoke test against /api/ocr
 ├── requirements.txt
 ├── requirements-texteller.txt
 ├── static/
@@ -164,11 +172,14 @@ The model ships a custom architecture not in the transformers core. The flag is
 required; without it you get an `UntrustedCode` exception. The model is from
 the `ucaslcl` org on HuggingFace.
 
-### 9. TexTeller serve vs CLI fallback
+### 9. TexTeller: stateless subprocess worker
 
-TexTeller 1.x may or may not expose a `serve` subcommand depending on the
-installed version. `texteller_model.py` tries the HTTP server first, falls
-back to `python -m texteller infer --image <path>` if the server exits early.
+The old HTTP-server + CLI-fallback approach for TexTeller was replaced with a
+simple stateless subprocess. `texteller_model.py` now calls
+`models/texteller_worker.py` directly inside `venv-texteller` for each
+inference request. The worker prints a single JSON line (`{"latex": "..."}` or
+`{"error": "..."}`) and exits. This is more reliable — no port management,
+no server-up polling, no fallback logic.
 
 ---
 
@@ -228,6 +239,75 @@ http://192.168.1.191:7860
 
 ---
 
+## Recent Changes and Fixes
+
+### REST API added (`app.py`)
+
+The service now runs under **uvicorn** with a FastAPI app. Gradio is mounted
+at `/` via `gr.mount_gradio_app()`. This approach keeps the `/api/*` routes
+alive through Gradio's internal `App.create_app()` call, which would have
+replaced them if we had patched `demo.app` directly.
+
+Three new endpoints:
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/ocr` | POST | Run OCR. `model` (form field) + `image` (file upload). Returns `{"latex":"...","model":"..."}` |
+| `/api/models` | GET | List model keys and VRAM budgets |
+| `/api/status` | GET | ModelManager load/eviction state |
+
+### GOT-OCR2 model class fix (`models/got_ocr2_model.py`)
+
+`AutoModelForCausalLM` → `AutoModel`. GOT-OCR2 uses a custom encoder-decoder
+architecture; the `CausalLM` class rejected it at load time.
+
+### OlmOCR three fixes (`models/olmocr_model.py`)
+
+1. **VRAM headroom**: added `--gpu-memory-utilization 0.87` and
+   `--max-num-seqs 32` to the vLLM subprocess. Without these, the sampler
+   warmup on an 11 GB card allocates ~446 MiB for 256 dummy sequences and
+   hits OOM.
+
+2. **Image resize**: new `_resize_for_model()` caps images at ~1 003 520 px
+   (1280 × 28²) and rounds dimensions to the nearest 28-pixel Qwen2-VL patch
+   boundary before sending to vLLM. Prevents token-budget overflow for
+   high-resolution scans.
+
+3. **Prompt + response parsing**: the prompt now instructs the model to use
+   `\(…\)` / `\[…\]` LaTeX delimiters and include page dimensions. Response
+   parsing now extracts `natural_text` from the JSON that olmOCR returns
+   (previously the raw JSON string was returned as the result).
+
+### RapidLaTeXOCR API fix (`models/rapidlatex_model.py`)
+
+Class renamed `LatexOCR` → `LaTeXOCR` to match the current `rapid-latex-ocr`
+package. The model now receives a **numpy array** instead of a PIL image,
+as required by the updated API.
+
+### Surya predictor-based API (`models/surya_model.py`)
+
+Updated for **surya ≥ 0.7**. The old `load_model` / `load_processor` +
+`run_ocr()` function no longer exists. Replaced with `DetectionPredictor` +
+`RecognitionPredictor` objects, called as `_rec_predictor([image], [["en"]], det_predictor=_det_predictor)`.
+
+### TexTeller stateless worker (`models/texteller_model.py` + `models/texteller_worker.py`)
+
+Replaced the HTTP-server-with-CLI-fallback approach with a simple stateless
+subprocess. For each inference request `texteller_model.py` spawns
+`venv-texteller/bin/python models/texteller_worker.py <tmp.png>`. The worker
+loads the model, runs inference, and prints a JSON result line. The caller
+scans stdout bottom-up for the first `{`-prefixed line and parses it. No ports,
+no polling, no fallback branches.
+
+### Smoke tests (`test_local.py`, `test_api.py`)
+
+- `test_local.py` — calls `model_manager.run()` directly (no HTTP needed)
+- `test_api.py` — POSTs to `/api/ocr` for each model; supports `--host`,
+  `--port`, `--models`, `--all` flags. Both download a test image from Dropbox
+  and print a pass/fail table.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
@@ -236,7 +316,7 @@ http://192.168.1.191:7860
 | `CUDA error: no kernel image` | Wrong PyTorch wheel (cu121 vs cu126) | Reinstall torch with `--index-url …/cu126` |
 | `undefined symbol: …` in venv-olmocr | torch pre-installed before vLLM | Delete venv-olmocr, recreate without torch |
 | OlmOCR timeout after 300s | vLLM failed to start (OOM or driver issue) | Check `journalctl -u ocr-service`, check `nvidia-smi` |
-| TexTeller always uses CLI | `texteller serve` not available in this version | Expected; CLI fallback works fine |
+| TexTeller returns no JSON output | Worker crashed before printing result | Check stderr in log; run `venv-texteller/bin/python models/texteller_worker.py <img>` manually |
 | MathJax not rendering | CDN blocked or local file missing | Re-run `wget` command in install notes above |
 | Port 7860 unreachable from LAN | UFW not configured | `sudo ufw allow from 192.168.1.0/24 to any port 7860 proto tcp` |
 

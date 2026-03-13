@@ -1,8 +1,9 @@
 """
 OCR/LaTeX Multi-Model Web Service
-Gradio UI on port 7860
+Gradio UI + REST API on port 7860
 """
 from __future__ import annotations
+import io
 import os
 import sys
 import traceback
@@ -10,6 +11,8 @@ from pathlib import Path
 
 import gradio as gr
 from PIL import Image
+from fastapi import UploadFile, File, Form
+from fastapi.responses import JSONResponse
 
 from model_manager import manager, VRAM_BUDGET
 
@@ -179,17 +182,54 @@ def build_ui():
     return demo
 
 
-if __name__ == "__main__":
-    # Serve local static files
-    app_kwargs = {}
-    if STATIC_DIR.exists():
-        app_kwargs["allowed_paths"] = [str(STATIC_DIR)]
+# ---------------------------------------------------------------------------
+# REST API routes
+# ---------------------------------------------------------------------------
 
+def add_api_routes(fastapi_app):
+    """Mount REST endpoints on the underlying FastAPI app before launch."""
+
+    @fastapi_app.post("/api/ocr")
+    async def api_ocr(model: str = Form(...), image: UploadFile = File(...)):
+        try:
+            data = await image.read()
+            pil_img = Image.open(io.BytesIO(data)).convert("RGB")
+            latex = manager.run(model, pil_img)
+            return {"latex": latex, "model": model}
+        except Exception as e:
+            return JSONResponse(
+                status_code=500,
+                content={"error": str(e), "model": model, "traceback": traceback.format_exc()},
+            )
+
+    @fastapi_app.get("/api/models")
+    async def api_models():
+        return {"models": [{"key": k, "vram_mib": v} for k, v in VRAM_BUDGET.items()]}
+
+    @fastapi_app.get("/api/status")
+    async def api_status():
+        return manager.status()
+
+
+if __name__ == "__main__":
+    # Build Gradio UI
     demo = build_ui()
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=7860,
-        share=False,
-        theme=gr.themes.Soft(),
-        **app_kwargs,
+
+    # Create a standalone FastAPI app so our /api/* routes survive Gradio's
+    # internal App.create_app() call (which would replace demo.app if we used
+    # the old demo.app approach).
+    from fastapi import FastAPI
+    import uvicorn
+
+    fastapi_app = FastAPI(title="OCR/LaTeX Service")
+    add_api_routes(fastapi_app)
+
+    allowed = [str(STATIC_DIR)] if STATIC_DIR.exists() else None
+    gr.mount_gradio_app(
+        fastapi_app,
+        demo,
+        path="/",
+        allowed_paths=allowed,
     )
+
+    uvicorn.run(fastapi_app, host="0.0.0.0", port=7860, log_level="info")

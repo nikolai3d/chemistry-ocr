@@ -11,13 +11,13 @@ _tokenizer = None
 def load():
     global _model, _tokenizer
     import torch
-    from transformers import AutoTokenizer, AutoModelForCausalLM
+    from transformers import AutoTokenizer, AutoModel
 
     model_id = "ucaslcl/GOT-OCR2_0"
     _tokenizer = AutoTokenizer.from_pretrained(
         model_id, trust_remote_code=True
     )
-    _model = AutoModelForCausalLM.from_pretrained(
+    _model = AutoModel.from_pretrained(
         model_id,
         torch_dtype=torch.float16,
         device_map="cuda",

@@ -7,8 +7,8 @@ _model = None
 
 def load():
     global _model
-    from rapid_latex_ocr import LatexOCR
-    _model = LatexOCR()
+    from rapid_latex_ocr import LaTeXOCR
+    _model = LaTeXOCR()
     return _model
 
 
@@ -18,7 +18,9 @@ def unload():
 
 
 def run(image: Image.Image) -> str:
+    import numpy as np
     if _model is None:
         load()
-    result, _ = _model(image)
+    img_array = np.array(image)
+    result, _ = _model(img_array)
     return result

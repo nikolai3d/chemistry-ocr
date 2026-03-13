@@ -1,46 +1,34 @@
-"""Surya OCR model — ~3500 MiB VRAM."""
+"""Surya OCR model — ~3500 MiB VRAM. Uses predictor-based API (surya >= 0.7)."""
 from __future__ import annotations
 from PIL import Image
 
-_det_model = None
-_det_processor = None
-_rec_model = None
-_rec_processor = None
+_det_predictor = None
+_rec_predictor = None
 
 
 def load():
-    global _det_model, _det_processor, _rec_model, _rec_processor
-    from surya.model.detection.model import load_model as load_det_model
-    from surya.model.detection.processor import load_processor as load_det_processor
-    from surya.model.recognition.model import load_model as load_rec_model
-    from surya.model.recognition.processor import load_processor as load_rec_processor
+    global _det_predictor, _rec_predictor
+    from surya.detection import DetectionPredictor
+    from surya.recognition import RecognitionPredictor
 
-    _det_model = load_det_model()
-    _det_processor = load_det_processor()
-    _rec_model = load_rec_model()
-    _rec_processor = load_rec_processor()
+    _det_predictor = DetectionPredictor()
+    _rec_predictor = RecognitionPredictor()
 
 
 def unload():
-    global _det_model, _det_processor, _rec_model, _rec_processor
-    _det_model = None
-    _det_processor = None
-    _rec_model = None
-    _rec_processor = None
+    global _det_predictor, _rec_predictor
+    _det_predictor = None
+    _rec_predictor = None
     import torch
     torch.cuda.empty_cache()
 
 
 def run(image: Image.Image) -> str:
-    if _det_model is None:
+    if _det_predictor is None:
         load()
-    from surya.ocr import run_ocr
-    langs = ["en"]
-    predictions = run_ocr(
-        [image], [langs], _det_model, _det_processor, _rec_model, _rec_processor
-    )
+    results = _rec_predictor([image], [["en"]], det_predictor=_det_predictor)
     lines = []
-    for page in predictions:
+    for page in results:
         for line in page.text_lines:
             lines.append(line.text)
     return "\n".join(lines)

@@ -38,6 +38,12 @@ def load():
                 "--model", _MODEL,
                 "--quantization", "bitsandbytes",
                 "--max-model-len", "4096",
+                # RTX 2080 Ti has 11264 MiB; the main OCR process holds ~500 MiB
+                # CUDA context. Lower gpu_memory_utilization to leave room for
+                # the sampler warmup allocation (~446 MiB for 256 dummy seqs).
+                # Also lower max_num_seqs to reduce warmup batch size.
+                "--gpu-memory-utilization", "0.87",
+                "--max-num-seqs", "32",
                 "--port", str(_PORT),
                 "--host", "127.0.0.1",
             ],
@@ -79,6 +85,22 @@ def unload():
             _proc = None
 
 
+def _resize_for_model(image: Image.Image) -> Image.Image:
+    """Resize image so total pixels ≤ MAX_PIXELS to stay within max-model-len."""
+    MAX_PIXELS = 1_003_520  # 1280 × 28² — produces ≤ ~1280 image tokens
+    w, h = image.size
+    if w * h <= MAX_PIXELS:
+        return image
+    import math
+    scale = math.sqrt(MAX_PIXELS / (w * h))
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+    # Round to nearest multiple of 28 (Qwen2-VL patch size)
+    new_w = max(28, (new_w // 28) * 28)
+    new_h = max(28, (new_h // 28) * 28)
+    return image.resize((new_w, new_h), Image.LANCZOS)
+
+
 def _image_to_b64(image: Image.Image) -> str:
     buf = io.BytesIO()
     image.save(buf, format="PNG")
@@ -88,7 +110,18 @@ def _image_to_b64(image: Image.Image) -> str:
 def run(image: Image.Image) -> str:
     load()
 
+    image = _resize_for_model(image)
     b64 = _image_to_b64(image)
+
+    w, h = image.size
+    prompt = (
+        f"Attached is the image of one page of a PDF document."
+        f"Just return the plain text representation of this document as if you were reading it naturally.\n"
+        f"Turn equations and math symbols into a LaTeX representation, make sure to use \\( and \\) as a delimiter for inline math, and \\[ and \\] for block math.\n"
+        f"Read any natural handwriting.\n"
+        f"Do not hallucinate.\n"
+        f"Page width: {w}, Page height: {h}"
+    )
 
     payload = {
         "model": _MODEL,
@@ -100,13 +133,7 @@ def run(image: Image.Image) -> str:
                         "type": "image_url",
                         "image_url": {"url": f"data:image/png;base64,{b64}"},
                     },
-                    {
-                        "type": "text",
-                        "text": (
-                            "Extract all text and mathematical formulas from this image. "
-                            "Return LaTeX for all math expressions."
-                        ),
-                    },
+                    {"type": "text", "text": prompt},
                 ],
             }
         ],
@@ -121,4 +148,15 @@ def run(image: Image.Image) -> str:
     )
     resp.raise_for_status()
     data = resp.json()
-    return data["choices"][0]["message"]["content"]
+    content = data["choices"][0]["message"]["content"]
+
+    # olmOCR returns JSON with natural_text field
+    try:
+        import json as _json
+        parsed = _json.loads(content)
+        if isinstance(parsed, dict) and "natural_text" in parsed:
+            return parsed["natural_text"] or ""
+    except Exception:
+        pass
+
+    return content
