@@ -1,0 +1,14 @@
+gradio>=4.0.0
+numpy<2.0.0
+Pillow<11.0.0
+timm==0.5.4
+requests
+pix2tex
+surya-ocr
+rapid-latex-ocr
+# GOT-OCR2 uses transformers from PyTorch ecosystem
+transformers>=4.37.0,<4.47
+accelerate
+sentencepiece
+tiktoken
+verovio

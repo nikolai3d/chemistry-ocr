@@ -1,0 +1,7 @@
+venv/
+venv-texteller/
+venv-olmocr/
+__pycache__/
+*.pyc
+*.pyo
+static/mathjax.min.js

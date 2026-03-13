@@ -1,0 +1,20 @@
+[Unit]
+Description=OCR/LaTeX Multi-Model Web Service
+After=network.target
+
+[Service]
+Type=simple
+User=nikolai
+WorkingDirectory=/home/nikolai/ocr-service
+ExecStart=/home/nikolai/ocr-service/venv/bin/python /home/nikolai/ocr-service/app.py
+Environment="HF_HOME=/home/nikolai/.cache/huggingface"
+Environment="CUDA_VISIBLE_DEVICES=0"
+Environment="GRADIO_SERVER_NAME=0.0.0.0"
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
