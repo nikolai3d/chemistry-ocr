@@ -46,8 +46,8 @@ def load():
             stderr=subprocess.PIPE,
         )
 
-        # Wait up to 300s — vLLM compiles CUDA kernels on first start
-        deadline = time.time() + 300
+        # Wait up to 900s — FlashInfer JIT-compiles CUDA kernels on first start
+        deadline = time.time() + 900
         while time.time() < deadline:
             try:
                 resp = requests.get(f"http://127.0.0.1:{_PORT}/health", timeout=2)
@@ -64,7 +64,7 @@ def load():
 
         _proc.terminate()
         _proc = None
-        raise TimeoutError("OlmOCR vLLM server did not start within 300s")
+        raise TimeoutError("OlmOCR vLLM server did not start within 900s")
 
 
 def unload():
